@@ -1,0 +1,204 @@
+from picamera2 import Picamera2
+import cv2
+import numpy as np
+
+# Initialize camera
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={"size": (320, 240)})
+picam2.configure(config)
+picam2.start()
+
+previous_response = None
+
+try:
+    while True:
+        frame = picam2.capture_array()
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # Convert to BGR
+        
+        # Preprocessing pipeline
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)  # Minimal blur
+        
+        # Validate input for adaptiveThreshold
+        if blurred is None or blurred.size == 0 or len(blurred.shape) != 2:
+            print("Error: Invalid input image for thresholding")
+            continue
+        
+        # Ensure block size is odd and greater than 1
+        block_size = 9
+        if block_size % 2 == 0:
+            block_size += 1
+        
+        try:
+            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                          cv2.THRESH_BINARY_INV, block_size, 3)
+        except cv2.error as e:
+            print(f"Error in adaptiveThreshold: {e}")
+            continue
+        
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, np.ones((2,2), np.uint8))
+        
+        # Contour detection
+        contours, hierarchy = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        response = None
+        
+        if contours and hierarchy is not None:
+            # Find outer contours (parentless)
+            outer_contours = [(c, i) for i, c in enumerate(contours) 
+                             if hierarchy[0][i][3] == -1]
+            
+            if outer_contours:
+                # Check all contours for arrows, prioritizing inner ones
+                all_contours = [(c, i) for i, c in enumerate(contours)]
+                arrow_contours = []
+                for contour, idx in all_contours:
+                    area = cv2.contourArea(contour)
+                    if area > 1500:
+                        perimeter = cv2.arcLength(contour, True)
+                        epsilon = 0.02 * perimeter
+                        approx = cv2.approxPolyDP(contour, epsilon, True)
+                        if len(approx) == 7:  # Typical for arrows
+                            arrow_contours.append((contour, idx))
+                
+                if arrow_contours:
+                    # Select the largest arrow contour
+                    main_contour, main_idx = max(arrow_contours, key=lambda x: cv2.contourArea(x[0]))
+                elif outer_contours:
+                    # Fallback to largest outer contour
+                    _, main_idx = max(outer_contours, key=lambda x: cv2.contourArea(x[0]))
+                    main_contour = contours[main_idx]
+                else:
+                    continue
+                
+                area = cv2.contourArea(main_contour)
+                if area > 1500:
+                    # Create mask for the contour
+                    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                    cv2.drawContours(mask, [main_contour], -1, 255, -1)
+                    
+                    # Convert frame to HSV for color detection
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    
+                    # Define color ranges in HSV
+                    red_lower1 = (0, 100, 100)
+                    red_upper1 = (10, 255, 255)
+                    red_lower2 = (170, 100, 100)
+                    red_upper2 = (180, 255, 255)
+                    green_lower = (40, 100, 100)
+                    green_upper = (80, 255, 255)
+                    blue_lower = (100, 100, 100)
+                    blue_upper = (140, 255, 255)
+                    black_lower = (0, 0, 0)
+                    black_upper = (180, 255, 30)
+                    
+                    # Compute color masks
+                    red_mask = cv2.inRange(hsv, red_lower1, red_upper1) + cv2.inRange(hsv, red_lower2, red_upper2)
+                    green_mask = cv2.inRange(hsv, green_lower, green_upper)
+                    blue_mask = cv2.inRange(hsv, blue_lower, blue_upper)
+                    black_mask = cv2.inRange(hsv, black_lower, black_upper)
+                    
+                    # Count pixels inside contour for each color
+                    red_count = cv2.countNonZero(cv2.bitwise_and(red_mask, mask))
+                    green_count = cv2.countNonZero(cv2.bitwise_and(green_mask, mask))
+                    blue_count = cv2.countNonZero(cv2.bitwise_and(blue_mask, mask))
+                    black_count = cv2.countNonZero(cv2.bitwise_and(black_mask, mask))
+                    total = cv2.countNonZero(mask)
+                    
+                    if total > 0:
+                        red_pct = red_count / total
+                        green_pct = green_count / total
+                        blue_pct = blue_count / total
+                        black_pct = black_count / total
+                    else:
+                        red_pct = green_pct = blue_pct = black_pct = 0
+                    
+                    # Determine dominant color
+                    color_pcts = {'red': red_pct, 'green': green_pct, 'blue': blue_pct, 'black': black_pct}
+                    dominant_color = max(color_pcts, key=color_pcts.get) if max(color_pcts.values()) > 0.7 else None
+                    
+                    perimeter = cv2.arcLength(main_contour, True)
+                    epsilon = 0.02 * perimeter
+                    approx = cv2.approxPolyDP(main_contour, epsilon, True)
+                    vertices = len(approx)
+                    
+                    # Shape detection
+                    shape = "pacman"  # Default
+                    if vertices == 3:
+                        shape = "triangle"
+                    elif vertices == 4:
+                        x, y, w, h = cv2.boundingRect(np.array(approx))
+                        aspect_ratio = w / float(h)
+                        shape = "square" if 0.95 <= aspect_ratio <= 1.05 else "rectangle"
+                    elif vertices == 5:
+                        shape = "pentagon"
+                    elif vertices == 6:
+                        shape = "hexagon"
+                    elif vertices == 7:
+                        shape = "arrow"
+                    else:
+                        circularity = (4 * np.pi * area) / (perimeter ** 2)
+                        if circularity > 0.75:
+                            shape = "circle"
+                    
+                    if shape == "arrow":
+                        # Calculate direction using minAreaRect
+                        rect = cv2.minAreaRect(main_contour)
+                        (x, y), (w, h), angle = rect
+
+                        # Determine long axis (arrow direction is along the longer side)
+                        if w < h:
+                            # Height is longer ? arrow points along height
+                            angle += 90  # Rotate angle to align with long axis
+                        else:
+                            # Width is longer ? no adjustment needed
+                            pass
+
+                        # Normalize angle to 0-360 degrees
+                        angle = angle % 360
+
+                        # Map angles to directions
+                        if 45 <= angle < 135:
+                            direction = "down"
+                        elif 135 <= angle < 225:
+                            direction = "right"
+                        elif 225 <= angle < 315:
+                            direction = "up"
+                        else:  # 315-360 or 0-45
+                            direction = "left"
+                            
+                        # Draw the rotated rectangle for debugging
+                        box = cv2.boxPoints(rect)
+                        box = np.intp(box)
+                        cv2.drawContours(frame, [box], 0, (0, 255, 0), 2)
+
+                        # Draw direction text
+                        cv2.putText(frame, f"Angle: {angle:.1f}", (20, 70), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        response = f"arrow pointing {direction}"
+
+                    elif dominant_color == 'red' and shape in ["circle", "pentagon"]:
+                        response = shape
+                    elif dominant_color == 'green' and shape in ["pacman", "hexagon"]:
+                        response = shape
+                    elif dominant_color == 'blue' and shape in ["rectangle", "triangle"]:
+                        response = shape
+                    else:
+                        response = "unknown"
+                    
+                    # Update display only when changed
+                    if response and response != "unknown" and response != previous_response:
+                        print(f"Detected: {response}")
+                        previous_response = response
+                    
+                    # Visual feedback
+                    cv2.drawContours(frame, [main_contour], -1, (0, 0, 255), 2)
+                    if response and response != "unknown":
+                        cv2.putText(frame, response, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        cv2.imshow("Detection", frame)
+        if cv2.waitKey(1) == ord('q'):
+            break
+
+finally:
+    picam2.stop()
+    cv2.destroyAllWindows()
