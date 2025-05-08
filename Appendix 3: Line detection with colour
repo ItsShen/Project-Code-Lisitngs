@@ -1,0 +1,160 @@
+import cv2
+import numpy as np
+import RPi.GPIO as GPIO
+import time
+from picamera2 import Picamera2
+
+# Pin configuration
+ENA = 12  # Enable A
+ENB = 13  # Enable B
+IN1 = 5   # Motor A - Input 1
+IN2 = 6   # Motor A - Input 2
+IN3 = 19  # Motor B - Input 3
+IN4 = 16  # Motor B - Input 4
+encR = 25 # Right encoder
+encL = 8  # Left encoder
+
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+GPIO.setup([ENA, ENB, IN1, IN2, IN3, IN4], GPIO.OUT)
+GPIO.setup(encR, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(encL, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+# PWM setup for speed control
+pwm_a = GPIO.PWM(ENA, 1000)  # Frequency: 1kHz
+pwm_b = GPIO.PWM(ENB, 1000)
+pwm_a.start(0)
+pwm_b.start(0)
+
+def move_forward(speed=50):
+    GPIO.output([IN1], GPIO.HIGH)
+    GPIO.output([IN2], GPIO.LOW)
+    GPIO.output([IN3], GPIO.LOW)
+    GPIO.output([IN4], GPIO.HIGH)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def turn_left(speed=80):
+    GPIO.output([IN1], GPIO.HIGH)
+    GPIO.output([IN2], GPIO.LOW)
+    GPIO.output([IN3], GPIO.HIGH)
+    GPIO.output([IN4], GPIO.LOW)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def turn_right(speed=80):
+    GPIO.output([IN1], GPIO.LOW)
+    GPIO.output([IN2], GPIO.HIGH)
+    GPIO.output([IN3], GPIO.LOW)
+    GPIO.output([IN4], GPIO.HIGH)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+    
+def reverse(speed=50):
+    GPIO.output([IN1], GPIO.LOW)
+    GPIO.output([IN2], GPIO.HIGH)
+    GPIO.output([IN3], GPIO.HIGH)
+    GPIO.output([IN4], GPIO.LOW)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def stop():
+    GPIO.output([IN1, IN2, IN3, IN4], GPIO.LOW)
+    pwm_a.ChangeDutyCycle(0)
+    pwm_b.ChangeDutyCycle(0)
+
+def find_line_position(binary_frame, min_area=100):
+    """
+    Find the centroid of the line in the binary frame.
+    Returns (x, y_roi) where y_roi is relative to the ROI.
+    """
+    moments = cv2.moments(binary_frame)
+    if moments["m00"] > min_area:  # Ensure sufficient area to filter noise
+        cx = int(moments["m10"] / moments["m00"])
+        cy_roi = int(moments["m01"] / moments["m00"])
+        return cx, cy_roi
+    return None, None
+
+# Define HSV ranges
+black_lower = np.array([0, 0, 0])
+black_upper = np.array([180, 255, 50])
+
+color_ranges = {
+    'red': [(np.array([0, 100, 100]), np.array([10, 255, 255])), 
+            (np.array([170, 100, 100]), np.array([180, 255, 255]))],  # Two ranges for red
+    'blue': [(np.array([100, 100, 100]), np.array([120, 255, 255]))],
+    'green': [(np.array([40, 50, 50]), np.array([80, 255, 255]))],
+    'yellow': [(np.array([20, 100, 100]), np.array([30, 255, 255]))]
+}
+
+# Choose two colors (example: red and green)
+chosen_colors = ['yellow', 'blue']
+
+# Initialize Camera
+picam2 = Picamera2()
+picam2.configure(picam2.create_preview_configuration(main={"size": (320, 240)}))
+picam2.start()
+
+# Main loop
+try:
+    while True:
+        image = picam2.capture_array() # camera captures as RGB by default
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # convert to BGR
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV) # now BGR to HSV
+        
+        # Create masks
+        black_mask = cv2.inRange(hsv, black_lower, black_upper)
+        color_mask = np.zeros_like(black_mask, dtype=np.uint8)
+        for color in chosen_colors:
+            for lower, upper in color_ranges[color]:
+                color_mask |= cv2.inRange(hsv, lower, upper)
+        
+        # Define ROI (lower third)
+        height, width = image.shape[:2]
+        roi_start = 1 * height // 3
+        black_roi = black_mask[roi_start:, :]
+        color_roi = color_mask[roi_start:, :]
+        
+        # Apply morphological operations
+        kernel = np.ones((3, 3), np.uint8)
+        black_processed = cv2.morphologyEx(black_roi, cv2.MORPH_OPEN, kernel)
+        color_processed = cv2.morphologyEx(color_roi, cv2.MORPH_OPEN, kernel)
+        
+        # Prioritize color lines
+        line_x, cy_roi = find_line_position(color_processed)
+        if line_x is not None:
+            line_y = roi_start + cy_roi  # Adjust y to full frame coordinates
+        else:
+            # Fallback to black line
+            line_x, cy_roi = find_line_position(black_processed)
+            if line_x is not None:
+                line_y = roi_start + cy_roi
+        
+        frame_center = width // 2
+        if line_x is not None:
+            error = line_x - frame_center
+            
+            # Visual debugging
+            cv2.circle(image, (line_x, line_y), 5, (0, 255, 0), -1)
+            cv2.imshow("Line Tracking", image)
+            cv2.waitKey(1)
+            
+            # Proportional control with deadzone
+            if abs(error) < 40: #21 to 40
+                move_forward(42)
+            elif error > 40:
+                turn_right(63)
+                time.sleep(0.005)
+            else:
+                turn_left(63)
+                time.sleep(0.005)
+        else:
+            reverse(36)
+            time.sleep(0.50)
+            stop()
+            time.sleep(0.1)
+
+except KeyboardInterrupt:
+    stop()
+    GPIO.cleanup()
+    cv2.destroyAllWindows()
