@@ -1,0 +1,100 @@
+import RPi.GPIO as GPIO
+import time
+
+# Pin configuration
+ENA = 12  # Enable A
+ENB = 13  # Enable B
+IN1 = 5  # Motor A - Input 1
+IN2 = 6  # Motor A - Input 2
+IN3 = 19  # Motor B - Input 3
+IN4 = 16  # Motor B - Input 4
+
+wheel_circumference = 6.5*3.142
+ticks_rev = 20
+
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+GPIO.setup([ENA, ENB, IN1, IN2, IN3, IN4], GPIO.OUT)
+
+# read initial state of encoder
+iStateR = GPIO.input(encR)
+countR = 0
+
+istateL = GPIO.input(encL)
+countL = 0
+
+# PWM setup for speed control
+pwm_a = GPIO.PWM(ENA, 1000)  # Frequency: 1kHz
+pwm_b = GPIO.PWM(ENB, 1000)
+
+pwm_a.start(0)  # Start with 0% duty cycle (stopped)
+pwm_b.start(0)
+
+def set_motor_speed(speed_a, speed_b):
+    pwm_a.ChangeDutyCycle(speed_a)
+    pwm_b.ChangeDutyCycle(speed_b)
+
+# Motor control functions
+def move_forward(speed_a=60, speed_b=60):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    set_motor_speed(speed_a, speed_b)
+
+def move_backward(speed_a=60, speed_b=60):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    set_motor_speed(speed_a, speed_b)
+
+def turn_right(speed_a=80, speed_b=80, *deg):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    set_motor_speed(speed_a, speed_b)
+
+def turn_left(speed_a=80, speed_b=80, *deg):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    set_motor_speed(speed_a, speed_b)
+
+def stop():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)
+    set_motor_speed(0, 0)
+
+# Main loop to test movement
+try:
+    while True:
+        command = input("Enter command (f: forward, b: backward, l: left, r: right, x: stop, q: quit): ").lower()
+        
+        if command == 'f':
+            move_forward()
+        elif command == 'b':
+            move_backward()
+        elif command == 'l':
+            turn_left()
+        elif command == 'r':
+            turn_right()
+        elif command == 'x':
+            stop()
+        elif command == 'q':
+            break
+        else:
+            print("Invalid command! Use f, b, l, r, x, or q.")
+
+except KeyboardInterrupt:
+    print("\nProgram stopped by user.")
+
+finally:
+    stop()
+    pwm_a.stop()
+    pwm_b.stop()
+    GPIO.cleanup()
